@@ -6,19 +6,27 @@ import re
 import time
 import subprocess
 from joblib import Parallel, delayed
+from datetime import datetime, timedelta
 
-# --- UTILS & TIME CONVERSION ---
-def time_convert(inp, mode, real_sd = '2010-01-02', sd_monday= "2009-12-28"):
-    if mode == 't2wn': # datetime string to week number
-        startdate = datetime.strptime(real_sd,'%Y-%m-%d')
-        return (datetime.strptime(inp, '%m/%d/%Y %H:%M:%S') - startdate).days//7
-    elif mode == 't2dt':
-        return datetime.strptime(inp, '%m/%d/%Y %H:%M:%S')
+BASE_PATH = "/kaggle/input/cert-r4-2/archive" 
+LDAP_PATH = os.path.join(BASE_PATH, "LDAP")
+ANSWERS_PATH = "/kaggle/input/cert-r4-2-answer/answers" # Hoặc đường dẫn chứa file insiders.csv
+
+def time_convert(inp, mode, real_sd='2010-01-02', sd_monday="2009-12-28"):
+    r42_fmt = '%m/%d/%Y %H:%M:%S'
+    if mode == 't2dt':
+        return datetime.strptime(inp, r42_fmt)
+    elif mode == 't2wn': 
+        startdate = datetime.strptime(real_sd, '%Y-%m-%d')
+        # Tính số ngày chênh lệch và chia 7 để ra số tuần
+        return (datetime.strptime(inp, r42_fmt) - startdate).days // 7
+    elif mode == 'dt2dn': 
+        startdate = datetime.strptime(sd_monday, '%Y-%m-%d')
+        return (inp - startdate).days
     elif mode == 'dt2date':
         return inp.strftime("%Y-%m-%d")
-    elif mode =='dt2dn': # datetime to day number
-        startdate = datetime.strptime(sd_monday,'%Y-%m-%d')
-        return (inp - startdate).days
+    elif mode == 't2date':
+        return datetime.strptime(inp, r42_fmt).strftime("%Y-%m-%d")
     return None
 
 def is_after_whour(dt): # Workhours: 7:30-17:30
@@ -33,12 +41,16 @@ def is_weekend(dt):
 # --- DATA PREPROCESSING ---
 def combine_by_timerange_pandas(dname = 'r4.2'):
     allacts = ['device','email','file', 'http','logon']
-    firstline = str(subprocess.check_output(['head', '-2', 'http.csv'])).split('\\n')[1]
+    http_path = os.path.join(BASE_PATH, 'http.csv')
+    with open(http_path, 'r') as f:
+        next(f) # Bỏ qua header
+        firstline = f.readline().strip()
+    
     firstdate_dt = time_convert(firstline.split(',')[1],'t2dt')
     firstdate_dt = firstdate_dt - timedelta(int(firstdate_dt.strftime("%w")))
     firstdate = time_convert(firstdate_dt, 'dt2date')
     
-    act_handles = {act: open(act+'.csv','r') for act in allacts}
+    act_handles = {act: open(os.path.join(BASE_PATH, act+'.csv'), 'r') for act in allacts}
     for h in act_handles.values(): next(h, None) # skip header
     
     lines = {act: act_handles[act].readline() for act in allacts}
@@ -54,7 +66,8 @@ def combine_by_timerange_pandas(dname = 'r4.2'):
                     # Map columns based on r4.2 format
                     if act == 'email': cols = ['id', 'date', 'user', 'pc', 'to', 'cc', 'bcc', 'from', 'size', '#att', 'content']
                     elif act in ['logon', 'device']: cols = ['id', 'date', 'user', 'pc', 'activity']
-                    elif act in ['http', 'file']: cols = ['id', 'date', 'user', 'pc', 'url/fname', 'content']
+                    elif act in ['http']: cols = ['id', 'date', 'user', 'pc', 'url', 'content']
+                    elif act in ['file']: cols = ['id', 'date', 'user', 'pc', 'filename', 'content']
                     
                     entry = dict(zip(cols, tmp))
                     entry['type'] = act
@@ -99,26 +112,27 @@ def process_user_pc(upd, roles):
 
 def getuserlist(dname = 'r4.2', psycho = True):
     # Đọc dữ liệu nhân sự từ các file LDAP
-    allfiles = ['LDAP/'+f1 for f1 in os.listdir('LDAP') if os.path.isfile('LDAP/'+f1)]
+    allfiles = [os.path.join(LDAP_PATH, f1) for f1 in os.listdir(LDAP_PATH) if os.path.isfile(os.path.join(LDAP_PATH, f1))]
     alluser = {}
     alreadyFired = []
     
     for file in allfiles:
+        filename_only = os.path.basename(file) # Lấy tên file (ví dụ: 2010-01.csv)
         af = (pd.read_csv(file, delimiter=',')).values
         employeesThisMonth = []    
         for i in range(len(af)):
             employeesThisMonth.append(af[i][1])
             if af[i][1] not in alluser:
-                # Cấu trúc dữ liệu r4.2: uname, email, role, b_unit, f_unit, dept, team, sup, wstart, wend
-                alluser[af[i][1]] = af[i][0:1].tolist() + af[i][2:].tolist() + [file.split('.')[0] , np.nan]
-
+                # Dùng filename_only để split lấy ngày tháng
+                alluser[af[i][1]] = af[i][0:1].tolist() + af[i][2:].tolist() + [filename_only.split('.')[0] , np.nan]
         firedEmployees = list(set(alluser.keys()) - set(alreadyFired) - set(employeesThisMonth))
         alreadyFired = alreadyFired + firedEmployees
         for e in firedEmployees:
-            alluser[e][-1] = file.split('.')[0]
+            alluser[e][-1] = filename_only.split('.')[0]
     
-    # Thêm dữ liệu tâm lý học (O-C-E-A-N) nếu có
-    if psycho and os.path.isfile("psychometric.csv"):
+    # Thêm dữ liệu tâm lý học (O-C-E-A-N)
+    psycho_path = os.path.join(BASE_PATH, "psychometric.csv")
+    if psycho and os.path.isfile(psycho_path):
         p_score = pd.read_csv("psychometric.csv", delimiter = ',').values
         for id in range(len(p_score)):
             alluser[p_score[id,1]] = alluser[p_score[id,1]] + list(p_score[id,2:])
@@ -154,7 +168,8 @@ def getuserlist(dname = 'r4.2', psycho = True):
 
 def get_mal_userdata(data = 'r4.2', usersdf = None):
     # Lọc danh sách kẻ nội gián cho tập r4.2
-    listmaluser = pd.read_csv("answers/insiders.csv")
+    insider_path = os.path.join(ANSWERS_PATH, "insiders.csv")
+    listmaluser = pd.read_csv(insider_path)
     listmaluser['dataset'] = listmaluser['dataset'].apply(lambda x: str(x))
     listmaluser = listmaluser[listmaluser['dataset'] == "4.2"]
     
@@ -176,15 +191,23 @@ def get_mal_userdata(data = 'r4.2', usersdf = None):
         usersdf.loc[u_id, 'malscene'] = listmaluser['scenario'][i]
         
         # Đọc chi tiết các hành động độc hại từ folder đáp án r4.2
-        mal_file_path = f"answers/r4.2-{listmaluser['scenario'][i]}/{listmaluser['details'][i]}"
-        malacts = open(mal_file_path, 'r').read().strip().split("\n")
-        malacts = [x.split(',') for x in malacts]
-
-        mal_users = np.array([x[3].strip('"') for x in malacts])
-        mal_act_ids = np.array([x[1].strip('"') for x in malacts])
+        scenario_num = str(listmaluser['scenario'][i]) 
+        folder_name = f"r4.2-{scenario_num}" 
+        file_name = listmaluser['details'][i]
+        mal_file_path = os.path.join(ANSWERS_PATH, folder_name, file_name)
+        try:
+            with open(mal_file_path, 'r') as f:
+                malacts = f.read().strip().split("\n")
+            
+            malacts = [x.split(',') for x in malacts]
+            mal_users = np.array([x[3].strip('"') for x in malacts])
+            mal_act_ids = np.array([x[1].strip('"') for x in malacts])
         
-        # Chỉ lấy các hành động thuộc về user hiện tại
-        usersdf.at[u_id, 'malacts'] = mal_act_ids[mal_users == u_id]
+            usersdf.at[u_id, 'malacts'] = mal_act_ids[mal_users == u_id]
+        
+        except FileNotFoundError:
+            print(f"LỖI: Không tìm thấy file tại {mal_file_path}")
+            usersdf.at[u_id, 'malacts'] = []
                     
     return usersdf
 
@@ -239,13 +262,13 @@ def email_process(act, data = 'r4.2'):
 
 def http_process(act, data = 'r4.2'): 
     # Đặc trưng cơ bản:
-    url_len = len(act['url/fname']) # Độ dài URL
-    url_depth = act['url/fname'].count('/') - 2 # Độ sâu của đường dẫn URL
+    url_len = len(act['url']) # Độ dài URL
+    url_depth = max(0, act['url'].count('/') - 2) # Độ sâu của đường dẫn URL
     content_len = len(act['content']) # Độ dài nội dung trang web
     content_nwords = act['content'].count(' ') + 1 # Số lượng từ trong nội dung
     
     # Xử lý lấy tên miền (domain name) từ URL
-    domainname = re.findall("//(.*?)/", act['url/fname'])[0]
+    domainname = re.findall("//(.*?)/", act['url'])[0]
     domainname = domainname.replace("www.", "")
     dn = domainname.split(".")
     
@@ -271,7 +294,7 @@ def http_process(act, data = 'r4.2'):
     elif domainname in ['indeed.com', 'monster.com', 'careerbuilder.com', 'simplyhired.com']:
         r = 4
     elif ('job' in domainname and ('hunt' in domainname or 'search' in domainname)) \
-    or ('aol.com' in domainname and ("recruit" in act['url/fname'] or "job" in act['url/fname'])):
+    or ('aol.com' in domainname and ("recruit" in act['url'] or "job" in act['url'])):
         r = 4
     # Nhóm 6: Công cụ tấn công/giám sát/keylogger
     elif (domainname in ['webwatchernow.com', 'actionalert.com', 'relytec.com', 'refog.com', 'wellresearchedreviews.com',
@@ -287,18 +310,18 @@ def http_process(act, data = 'r4.2'):
 
 def file_process(act, data = 'r4.2'):
     # Lấy phần mở rộng của file (ví dụ: .doc, .txt)
-    if "." in act['url/fname']:
-        ftype = act['url/fname'].split(".")[1]
+    if "." in act['filename']:
+        ftype = act['filename'].split(".")[-1].lower()
     else:
         ftype = "unknown"
 
     # Xác định loại ổ đĩa: C (nội bộ): 1, R (ổ đĩa mạng/rời): 2, Khác: 0
-    disk = 1 if act['url/fname'][0] == 'C' else 0
-    if act['url/fname'][0] == 'R': 
+    disk = 1 if act['filename'][0] == 'C' else 0
+    if act['filename'][0] == 'R': 
         disk = 2
     
     # Độ sâu của thư mục (số lượng dấu gạch chéo ngược)
-    file_depth = act['url/fname'].count('\\')
+    file_depth = act['filename'].count('\\')
 
     # Đặc trưng từ nội dung file
     fsize = len(act['content']) # Kích thước dựa trên độ dài nội dung
@@ -417,7 +440,7 @@ def process_week_num(week, users, userlist = 'all', data = 'r4.2'):
                 
             # 5. Kiểm tra nếu hành động cụ thể này nằm trong danh sách độc hại
             is_mal_act = 0
-            if mal_u > 0 and df_acts_u.index[i] in users.loc[u]['malacts']: 
+            if mal_u > 0 and df_acts_u.iloc[i]['id'] in users.loc[u]['malacts']: 
                 is_mal_act = 1
 
             # Gộp tất cả thành một hàng dữ liệu số
@@ -475,7 +498,11 @@ def get_sessions(uw, first_sid=0):
         else:
             start_status = 1 if act_type == 1 else 2
             open_sessions[current_pc] = [current_pc, start_status, 0, uw.loc[i]['time_stamp'], uw.loc[i]['time_stamp'], 1, [i]]
-            
+
+    for pc in open_sessions:
+        sessions[sid] = [first_sid + sid] + open_sessions[pc]
+        sid += 1
+
     return sessions
 
 def get_u_features_dicts(ul, data = 'r4.2'):
@@ -730,17 +757,14 @@ def to_csv(week, mode, data, ul, uf_dict, list_uf):
 
 if __name__ == "__main__":
     # 1. Kiểm tra thư mục hiện tại có phải là r4.2 không
-    dname = os.getcwd().split('/')[-1]
-    if dname != 'r4.2':
-        print("Warning: Script is optimized for r4.2")
-    
+    dname = 'r4.2'
     # 2. Tạo các thư mục tạm và thư mục chứa kết quả
     for folder in ["tmp", "ExtractedData", "DataByWeek", "NumDataByWeek"]:
         if not os.path.exists(folder):
             os.mkdir(folder)
     
     # Cấu hình số luồng xử lý song song (mặc định 8)
-    numCores = 8
+    numCores = 4
     if len(sys.argv) > 1:
         numCores = int(sys.argv[1])
         
