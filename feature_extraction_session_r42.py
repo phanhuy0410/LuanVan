@@ -10,7 +10,6 @@ import re
 import time
 import shutil
 from joblib import Parallel, delayed
-from datetime import datetime, timedelta
 
 BASE_PATH = "/kaggle/input/cert-r4-2/archive" 
 LDAP_PATH = os.path.join(BASE_PATH, "LDAP")
@@ -43,7 +42,7 @@ def is_weekend(dt):
     return dt.strftime("%w") in ['0', '6']
 
 # --- DATA PREPROCESSING ---
-def combine_by_timerange_pandas(dname = 'r4.2', chunk_size=200000):
+def combine_by_timerange_pandas(dname = 'r4.2', chunk_size=300000):
     all_columns = ['id', 'date', 'user', 'pc', 'type', 
                    'activity', 'url', 'filename', 'content', 
                    'to', 'cc', 'bcc', 'from', 'size', '#att']
@@ -217,7 +216,7 @@ def getuserlist(dname = 'r4.2', psycho = True):
     # Thêm dữ liệu tâm lý học (O-C-E-A-N)
     psycho_path = os.path.join(BASE_PATH, "psychometric.csv")
     if psycho and os.path.isfile(psycho_path):
-        p_score = pd.read_csv("psychometric.csv", delimiter = ',').values
+        p_score = pd.read_csv(psycho_path, delimiter = ',').values
         for id in range(len(p_score)):
             alluser[p_score[id,1]] = alluser[p_score[id,1]] + list(p_score[id,2:])
         df = pd.DataFrame.from_dict(alluser, orient='index')
@@ -236,8 +235,8 @@ def getuserlist(dname = 'r4.2', psycho = True):
         df.at[i, 'sup'] = sup
         
     # Xác định PC dựa trên log 2 tuần đầu tiên
-    w1 = pd.read_parquet("DataByWeek/1.parquet")
-    w2 = pd.read_parquet("DataByWeek/2.parquet")
+    w1 = pd.read_parquet("DataByWeek/0.parquet")
+    w2 = pd.read_parquet("DataByWeek/1.parquet")
     user_pc_dict = pd.DataFrame(index=df.index)
     user_pc_dict['pcs'] = None  
   
@@ -443,7 +442,7 @@ def from_pc(act, ul):
     else:
         return (2, act_pc)
 
-def process_week_num(week, users, userlist = 'all', data = 'r4.2', chunk_size=100000):
+def process_week_num(week, users, userlist = 'all', data = 'r4.2', chunk_size=300000):
     user_dict = {idx: i for (i, idx) in enumerate(users.index)}        
     
     # Đọc dữ liệu nguồn (Input)
@@ -655,11 +654,11 @@ def f_stats_calc(ud, fn, stats_f, countonly_f = {}, get_stats = False):
             if f_count > 0:
                 r += [np.min(inp), np.max(inp), np.median(inp), np.mean(inp), np.std(inp)]
             else: 
-                r += [0, 0, 0, 0, 0]
+                r += [0.0, 0.0, 0.0, 0.0, 0.0]
             f_names += [fn+'_min_'+f, fn+'_max_'+f, fn+'_med_'+f, fn+'_mean_'+f, fn+'_std_'+f]
         else:
             # Mặc định chỉ lấy trung bình nếu get_stats = False
-            r += [np.mean(inp)] if f_count > 0 else [0]
+            r += [np.mean(inp)] if f_count > 0 else [0.0]
             f_names += [fn+'_mean_'+f]
         
     # Đếm số lượng xuất hiện của các giá trị cụ thể (ví dụ: số lần dùng PC lạ)
@@ -796,7 +795,7 @@ def session_instance_calc(ud, sinfo, week, mode, data, uw, v, list_uf):
     
     return (session_instance, tmp[3]) # Trả về instance và danh sách tên cột (tmp[3])
 
-def to_csv(week, mode, data, ul, uf_dict, list_uf, chunk_size=10000):
+def to_csv(week, mode, data, ul, uf_dict, list_uf, chunk_size=300000):
     # Khởi tạo từ điển ánh xạ user ID
     user_dict = {i : idx for (i, idx) in enumerate(ul.index)} 
     
@@ -933,7 +932,7 @@ if __name__ == "__main__":
             os.mkdir(folder)
     
     # Cấu hình số luồng xử lý song song (mặc định 8)
-    numCores = 2
+    numCores = 4
     if len(sys.argv) > 1:
         try:
             # Cố gắng đọc tham số nếu người dùng truyền số vào
@@ -972,19 +971,32 @@ if __name__ == "__main__":
     output_file = f'ExtractedData/{mode}_{dname}.parquet'
     print(f"Starting to merge files into {output_file}...")
     writer = None
+    ref_schema = None
     for w in range(numWeek):
         week_file = f"tmp/{w}{mode}.parquet"
         if os.path.exists(week_file):
             # Đọc file pickle tuần hiện tại
             df_chunk = pd.read_parquet(week_file)
-            table = pa.Table.from_pandas(df_chunk)
+            
             if writer is None:
+                # Đây là chunk đầu tiên (thường là tuần 0 hoặc 1) -> Làm chuẩn
+                table = pa.Table.from_pandas(df_chunk)
                 writer = pq.ParquetWriter(output_file, table.schema, compression='snappy')
-            try: writer.write_table(table)
-            except Exception as e:
-                print(f"Error writing week {w}: {e}")
+                writer.write_table(table)
+                # Lưu lại kiểu dữ liệu của pandas để ép các chunk sau
+                ref_dtypes = df_chunk.dtypes
+            else:
+                try:
+                    df_chunk = df_chunk.astype(ref_dtypes)
+                except Exception as e:
+                    print(f"Warning: Could not cast types for week {w}. Reason: {e}")
+                
+                table = pa.Table.from_pandas(df_chunk)
+                try: 
+                    writer.write_table(table)
+                except Exception as e:
+                    print(f"Error writing week {w}: {e}")
         else: pass
-
     # Đóng writer để hoàn tất file
     if writer:
         writer.close()
